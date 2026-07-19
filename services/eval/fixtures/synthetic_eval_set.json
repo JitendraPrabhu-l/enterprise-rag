@@ -1,0 +1,20 @@
+[
+  {
+    "question": "What is the standard TTL for an ephemeral prompt cache entry, and what alternative TTL is available?",
+    "reference_context": "Prompt caching defaults to a 5-minute ephemeral TTL. A 1-hour TTL is also available by setting cache_control.ttl to \"1h\", at roughly double the cache-write cost of the 5-minute default.",
+    "reference_answer": "The default TTL is 5 minutes; a 1-hour TTL is available by explicitly setting cache_control.ttl to \"1h\".",
+    "source_document_id": "demo-doc-prompt-caching"
+  },
+  {
+    "question": "Why does the retrieval pipeline apply the tenant_id filter before running vector distance search rather than after?",
+    "reference_context": "Hard pre-filtering enforces tenancy and access-role scoping as a database constraint evaluated before vector distance is computed. Applying the filter after ranking would let an out-of-scope but highly similar vector surface in results before being filtered, which is a tenancy-isolation failure rather than a quality one.",
+    "reference_answer": "Filtering before the vector search runs prevents a similar-but-out-of-scope document from ever being ranked or returned, closing a tenancy-isolation gap that a post-hoc filter would leave open.",
+    "source_document_id": "demo-doc-tenancy-filter"
+  },
+  {
+    "question": "What are the three axes scored by the RAG Triad evaluation?",
+    "reference_context": "The RAG Triad automates system benchmarking across three axes: Faithfulness (whether the answer contains details not present in the retrieved context), Answer Relevance (whether the model actually addressed the user's specific prompt), and Context Precision (whether the retriever returned irrelevant noise).",
+    "reference_answer": "The three axes are Faithfulness, Answer Relevance, and Context Precision.",
+    "source_document_id": "demo-doc-rag-triad"
+  }
+]

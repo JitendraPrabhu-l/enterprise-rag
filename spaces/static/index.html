@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Production RAG</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#128218;</text></svg>" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">📚</span>
+      <span class="brand-name">Production RAG</span>
+    </div>
+    <nav class="health-chips" id="health-chips" aria-label="Service health">
+      <span class="chip" data-svc="ingestion">ingestion</span>
+      <span class="chip" data-svc="retrieval">retrieval</span>
+      <span class="chip" data-svc="generation">generation</span>
+      <span class="chip" data-svc="eval">eval</span>
+    </nav>
+    <nav class="ext-links">
+      <!-- The full stack links to Grafana/Phoenix/Alertmanager here; this
+           consolidated free-tier demo doesn't ship the observability
+           train, so dead localhost links are replaced with a label. -->
+      <span class="demo-note" title="Single-container demo of a four-service stack — observability (Grafana/Phoenix/Alertmanager) runs in the full deployment only">consolidated demo</span>
+    </nav>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <section class="panel">
+        <h2>Ingest a document</h2>
+        <form id="upload-form">
+          <label class="field">
+            <span>Document <em>(PDF, TXT/MD, JSON/JSONL, CSV, HTML, DOCX)</em></span>
+            <input type="file" id="file-input"
+                   accept=".pdf,.txt,.md,.markdown,.log,.json,.jsonl,.csv,.html,.htm,.docx" required />
+          </label>
+          <label class="field">
+            <span>Source domain</span>
+            <input type="text" id="domain-input" value="finance" required
+                   pattern="[a-z0-9\-]+" title="lowercase letters, digits, hyphens" />
+          </label>
+          <label class="field">
+            <span>Title <em>(optional)</em></span>
+            <input type="text" id="title-input" placeholder="Document title" />
+          </label>
+          <button type="submit" id="upload-btn">Upload &amp; ingest</button>
+        </form>
+        <div id="job-status" class="job-status" hidden>
+          <div class="job-line"><span class="spinner" id="job-spinner"></span><span id="job-text"></span></div>
+          <div class="job-meta" id="job-meta"></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Query settings</h2>
+        <label class="field">
+          <span>Restrict to domain <em>(blank = all)</em></span>
+          <input type="text" id="query-domain" value="finance" />
+        </label>
+        <label class="field">
+          <span>Results used (top_n)</span>
+          <input type="number" id="top-n" value="5" min="1" max="20" />
+        </label>
+      </section>
+    </aside>
+
+    <section class="chat">
+      <div class="messages" id="messages">
+        <div class="msg system">
+          <p>Upload a document on the left (PDF, text, JSON, CSV, HTML, DOCX), then ask
+          questions about it. Answers cite the exact pages or records they came from.</p>
+        </div>
+      </div>
+      <form class="composer" id="chat-form">
+        <textarea id="chat-input" rows="2" placeholder="Ask a question about your documents…" required></textarea>
+        <button type="submit" id="send-btn">Send</button>
+      </form>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

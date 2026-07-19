@@ -1,0 +1,14 @@
+# ADR-017: Ragas's own dependency tree, installed into a SEPARATE venv from
+# rag_core/rag_eval — never merge this into services/eval/pyproject.toml.
+#
+# Ragas requires openai>=2, which conflicts with this project's openai<2 pin
+# (rag_core and every service). langchain-community is pinned <0.4 because
+# ragas 0.4.3's own import path (ragas.llms.base -> ChatVertexAI) breaks
+# against langchain-community 0.4.2, which moved that class elsewhere —
+# confirmed by reproducing the failure in a clean venv.
+ragas>=0.4,<0.5
+langchain-community>=0.3,<0.4
+instructor>=1.0,<2
+httpx>=0.27,<1
+sentence-transformers>=3.0,<4
+openai>=2.0,<3

@@ -1,0 +1,12 @@
+# CPU-only torch first (the Dockerfile passes the cpu wheel index) — keeps
+# the image ~2 GB smaller than the default CUDA-bundled wheels.
+torch==2.5.1
+sentence-transformers==3.3.1
+qdrant-client==1.12.1
+bm25s==0.3.9
+PyMuPDF==1.25.1
+python-docx==1.1.2
+fastapi==0.115.6
+uvicorn==0.34.0
+python-multipart==0.0.20
+httpx==0.28.1
