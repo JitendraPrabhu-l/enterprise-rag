@@ -1,0 +1,40 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv*/
+venv/
+
+.env
+*.env.local
+
+# terraform/kind local state — tfstate + kubeconfig carry cluster keys
+deploy/terraform/.terraform/
+deploy/terraform/*.tfstate*
+deploy/terraform/kubeconfig
+deploy/terraform/production-rag-config
+
+# local tooling caches / scratch
+.pip_cache/
+.tf_schema_check/
+eval-results.json
+
+# large local documents (test corpora live outside the repo)
+/*.pdf
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+.idea/
+.vscode/
+*.swp
+
+qdrant_storage/
+neo4j_data/
+opensearch_data/
