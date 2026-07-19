@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-phoenix
+  labels:
+    {{- include "production-rag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: phoenix
+spec:
+  serviceName: {{ .Release.Name }}-phoenix
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: phoenix
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: phoenix
+    spec:
+      containers:
+        - name: phoenix
+          image: {{ .Values.phoenix.image }}
+          env:
+            - name: PHOENIX_WORKING_DIR
+              value: /mnt/data
+          ports:
+            - containerPort: {{ .Values.phoenix.uiPort }}
+            - containerPort: {{ .Values.phoenix.grpcPort }}
+          readinessProbe:
+            httpGet: {path: /, port: {{ .Values.phoenix.uiPort }}}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: phoenix-storage
+              mountPath: /mnt/data
+  volumeClaimTemplates:
+    - metadata:
+        name: phoenix-storage
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.phoenix.storage.storageClassName }}
+        storageClassName: {{ .Values.phoenix.storage.storageClassName }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.phoenix.storage.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-phoenix
+  labels:
+    {{- include "production-rag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: phoenix
+spec:
+  {{- include "production-rag.serviceType" . | nindent 2 }}
+  selector:
+    app.kubernetes.io/component: phoenix
+  ports:
+    - name: ui
+      port: {{ .Values.phoenix.uiPort }}
+      targetPort: {{ .Values.phoenix.uiPort }}
+      {{- if eq .Values.service.type "NodePort" }}
+      nodePort: {{ .Values.phoenix.uiNodePort }}
+      {{- end }}
+    - name: grpc
+      port: {{ .Values.phoenix.grpcPort }}
+      targetPort: {{ .Values.phoenix.grpcPort }}

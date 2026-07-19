@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-opensearch
+  labels:
+    {{- include "production-rag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: opensearch
+spec:
+  serviceName: {{ .Release.Name }}-opensearch
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: opensearch
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: opensearch
+    spec:
+      containers:
+        - name: opensearch
+          image: {{ .Values.opensearch.image }}
+          env:
+            - name: discovery.type
+              value: "single-node"
+            - name: plugins.security.disabled
+              value: "true"
+            - name: OPENSEARCH_JAVA_OPTS
+              value: "-Xms512m -Xmx512m"
+            - name: OPENSEARCH_INITIAL_ADMIN_PASSWORD
+              value: "ChangeMe_Dev123!"
+          ports:
+            - containerPort: {{ .Values.opensearch.port }}
+          readinessProbe:
+            httpGet: {path: /_cluster/health, port: {{ .Values.opensearch.port }}}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /_cluster/health, port: {{ .Values.opensearch.port }}}
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          volumeMounts:
+            - name: opensearch-storage
+              mountPath: /usr/share/opensearch/data
+  volumeClaimTemplates:
+    - metadata:
+        name: opensearch-storage
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.opensearch.storage.storageClassName }}
+        storageClassName: {{ .Values.opensearch.storage.storageClassName }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.opensearch.storage.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-opensearch
+  labels:
+    {{- include "production-rag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: opensearch
+spec:
+  selector:
+    app.kubernetes.io/component: opensearch
+  ports:
+    - port: {{ .Values.opensearch.port }}
+      targetPort: {{ .Values.opensearch.port }}

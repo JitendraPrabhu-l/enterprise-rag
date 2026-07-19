@@ -1,0 +1,59 @@
+# Public-deployment override (ADR-022): docker-compose.yml maps every store
+# to a host port, which is right for localhost development and wrong for a
+# VM with a public IP — OpenSearch runs with its security plugin disabled,
+# Redis has no auth, and MinIO/Neo4j ship with well-known default creds.
+#
+# This override strips every host port mapping except the UI (:80) and
+# Grafana (:3000, anonymous access disabled — login required). Everything
+# else stays reachable on the internal Docker network exactly as before.
+#
+# Usage (on the VM):
+#   docker compose -f docker-compose.yml -f deploy/oracle/docker-compose.public.yml up -d --build
+#
+# `!override` needs Docker Compose v2.24.4+ (deploy/oracle/setup.sh installs
+# current stable). Ports 80/443 also need an OCI Security List ingress rule —
+# see docs/DEPLOY-ORACLE.md.
+
+services:
+  ui:
+    ports: !override
+      - "80:80"
+
+  grafana:
+    ports: !override
+      - "3000:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SECURITY_ADMIN_USER: admin
+      # Generated into .env by setup.sh — never the Grafana default.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set in .env}
+
+  # ---- internal-only from here down: no host ports on a public VM ----
+  qdrant:
+    ports: !override []
+  opensearch:
+    ports: !override []
+  neo4j:
+    ports: !override []
+  redis:
+    ports: !override []
+  minio:
+    ports: !override []
+  otel-collector:
+    ports: !override []
+  phoenix:
+    ports: !override []
+  prometheus:
+    ports: !override []
+  alertmanager:
+    ports: !override []
+  loki:
+    ports: !override []
+  ingestion:
+    ports: !override []
+  retrieval:
+    ports: !override []
+  generation:
+    ports: !override []
+  eval:
+    ports: !override []

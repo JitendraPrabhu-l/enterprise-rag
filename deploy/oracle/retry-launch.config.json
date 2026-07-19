@@ -1,0 +1,20 @@
+{
+  "_comment": "Fill in every OCID below (see SETUP-RETRY-LAUNCH.md for exactly where to copy each one from the OCI Console), then run retry-launch.ps1. Nothing here is secret except your account itself being tied to it — this file has no API keys in it.",
+
+  "compartment_id": "ocid1.tenancy.oc1..aaaaaaaaa26sj733uwppwx3xvemktopzvn23wnk4ssdh4k3phuqi4zthbcca",
+  "availability_domain": "hMTP:AP-HYDERABAD-1-AD-1",
+  "subnet_id": "ocid1.subnet.oc1.ap-hyderabad-1.aaaaaaaa737agoohmzlrcj3tahjqm7nzotjfx7bmd3ih6it7v352htmruw6q",
+  "image_id": "ocid1.image.oc1.ap-hyderabad-1.aaaaaaaa3asiyfwj22dun3qqkgrgofuyusie4lud6p6aynl6oeikxrgxof3a",
+  "ssh_public_key_path": "C:\\Users\\Jitendra Prabhu L\\.ssh\\oracle_rag_key.pub",
+
+  "shape": "VM.Standard.A1.Flex",
+  "ocpus": 4,
+  "memory_in_gbs": 24,
+  "boot_volume_size_in_gbs": 150,
+
+  "display_name": "rag-stack-vm",
+
+  "retry_interval_seconds": 120,
+  "max_attempts": 0,
+  "_max_attempts_note": "0 = retry forever until it succeeds or you Ctrl+C it"
+}

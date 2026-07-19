@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-ingestion
+  labels:
+    {{- include "production-rag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ingestion
+spec:
+  replicas: {{ .Values.applicationServices.ingestion.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: ingestion
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: ingestion
+    spec:
+      containers:
+        - name: ingestion
+          image: "{{ .Values.image.registry }}/ingestion:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            {{- include "production-rag.commonEnv" . | nindent 12 }}
+            - name: SERVICE_NAME
+              value: rag-ingestion
+          ports:
+            - containerPort: {{ .Values.applicationServices.ingestion.port }}
+          readinessProbe:
+            httpGet: {path: /healthz, port: {{ .Values.applicationServices.ingestion.port }}}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          livenessProbe:
+            httpGet: {path: /healthz, port: {{ .Values.applicationServices.ingestion.port }}}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.applicationServices.ingestion.resources | nindent 12 }}
+          volumeMounts:
+            - name: uploads
+              mountPath: /tmp/rag-ingestion-uploads
+      volumes:
+        - name: uploads
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-ingestion-uploads
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-ingestion-uploads
+  labels:
+    {{- include "production-rag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ingestion
+spec:
+  # ADR-015/ADR-018: ReadWriteMany since both the ingestion Deployment and
+  # the ingestion-worker Deployment mount this concurrently — a multipart
+  # upload the API pod writes must be visible to whichever worker pod picks
+  # the Celery job up next, same as docker-compose.yml's shared
+  # ingestion_uploads volume. Requires a storage class that supports RWX
+  # (e.g. NFS-backed); the cluster operator must provide one.
+  accessModes: ["ReadWriteMany"]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-ingestion
+  labels:
+    {{- include "production-rag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ingestion
+spec:
+  {{- include "production-rag.serviceType" . | nindent 2 }}
+  selector:
+    app.kubernetes.io/component: ingestion
+  ports:
+    - port: {{ .Values.applicationServices.ingestion.servicePort }}
+      targetPort: {{ .Values.applicationServices.ingestion.port }}
+      {{- if eq .Values.service.type "NodePort" }}
+      nodePort: {{ .Values.applicationServices.ingestion.nodePort }}
+      {{- end }}

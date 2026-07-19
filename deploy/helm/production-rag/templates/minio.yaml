@@ -1,0 +1,122 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-minio
+  labels:
+    {{- include "production-rag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  serviceName: {{ .Release.Name }}-minio
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: minio
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: minio
+    spec:
+      containers:
+        - name: minio
+          image: {{ .Values.minio.image }}
+          command: ["server", "/data", "--console-address", ":{{ .Values.minio.consolePort }}"]
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: minio-root-user
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: minio-root-password
+          ports:
+            - containerPort: {{ .Values.minio.apiPort }}
+            - containerPort: {{ .Values.minio.consolePort }}
+          readinessProbe:
+            httpGet: {path: /minio/health/live, port: {{ .Values.minio.apiPort }}}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /minio/health/live, port: {{ .Values.minio.apiPort }}}
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          volumeMounts:
+            - name: minio-storage
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: minio-storage
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.minio.storage.storageClassName }}
+        storageClassName: {{ .Values.minio.storage.storageClassName }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.minio.storage.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-minio
+  labels:
+    {{- include "production-rag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  {{- include "production-rag.serviceType" . | nindent 2 }}
+  selector:
+    app.kubernetes.io/component: minio
+  ports:
+    - name: api
+      port: {{ .Values.minio.apiPort }}
+      targetPort: {{ .Values.minio.apiPort }}
+      {{- if eq .Values.service.type "NodePort" }}
+      nodePort: {{ .Values.minio.apiNodePort }}
+      {{- end }}
+    - name: console
+      port: {{ .Values.minio.consolePort }}
+      targetPort: {{ .Values.minio.consolePort }}
+      {{- if eq .Values.service.type "NodePort" }}
+      nodePort: {{ .Values.minio.consoleNodePort }}
+      {{- end }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-minio-init
+  labels:
+    {{- include "production-rag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio-init
+  annotations:
+    # ADR-014/ADR-018: re-run on every `helm upgrade`, mirroring
+    # docker-compose.yml's minio-init (idempotent `mc mb --ignore-existing`,
+    # meant to run every stack startup, not just the first).
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 5
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: minio-init
+          image: minio/mc:RELEASE.2024-10-08T09-37-26Z
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: minio-root-user
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: minio-root-password
+          command:
+            - /bin/sh
+            - -c
+            - >
+              mc alias set local http://{{ .Release.Name }}-minio:{{ .Values.minio.apiPort }} "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" &&
+              mc mb --ignore-existing local/{{ .Values.env.minioBucket }}

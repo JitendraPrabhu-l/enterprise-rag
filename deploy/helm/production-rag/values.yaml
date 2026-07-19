@@ -1,0 +1,154 @@
+# ADR-018: mirrors docker-compose.yml's x-service-env anchor — one place
+# changes behavior across every application service, same as Compose.
+
+service:
+  # ClusterIP is correct for any real cluster with its own ingress/load
+  # balancer. Overridden to NodePort by values-kind.yaml (ADR-019) for the
+  # local kind-cluster path, where the nodePort values there must exactly
+  # match the extraPortMappings.container_port values in
+  # deploy/terraform/variables.tf — the two are read together, not derived
+  # from one shared source, so keep them in sync by hand if either changes.
+  type: ClusterIP
+
+image:
+  # Application service images. In CI these are built and pushed to GHCR
+  # (see .github/workflows/ci.yml's deploy job); the repository/tag here
+  # should match what that job pushes.
+  registry: ghcr.io/example/production-rag
+  tag: latest
+  pullPolicy: IfNotPresent
+
+secrets:
+  # Local/dev convenience only — a real deployment overrides these via
+  # --set or -f a separate values file never committed to source control.
+  groqApiKey: ""
+  neo4jPassword: "change-me-in-prod"
+  minioRootUser: "minioadmin"
+  minioRootPassword: "minioadmin_change_me"
+
+env:
+  generationModel: "openai/gpt-oss-120b"
+  visionModel: "openai/gpt-oss-120b"
+  utilityModel: "openai/gpt-oss-120b"
+  neo4jUser: "neo4j"
+  rateLimitPerMinute: "60"
+  minioBucket: "rag-documents"
+  otelTracesSampleRate: "1.0"
+  environment: "production"
+  logLevel: "INFO"
+
+applicationServices:
+  ingestion:
+    replicas: 1
+    port: 8000
+    servicePort: 8001
+    nodePort: 30001
+    resources:
+      requests: {cpu: "250m", memory: "512Mi"}
+      limits: {cpu: "1", memory: "2Gi"}
+  ingestionWorker:
+    replicas: 1
+    command: ["celery", "-A", "rag_ingestion.tasks.celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
+    resources:
+      requests: {cpu: "500m", memory: "1Gi"}
+      limits: {cpu: "2", memory: "4Gi"}
+  retrieval:
+    replicas: 1
+    port: 8000
+    servicePort: 8002
+    nodePort: 30002
+    resources:
+      requests: {cpu: "500m", memory: "1Gi"}
+      limits: {cpu: "2", memory: "3Gi"}
+  generation:
+    replicas: 1
+    port: 8000
+    servicePort: 8003
+    nodePort: 30003
+    resources:
+      requests: {cpu: "250m", memory: "512Mi"}
+      limits: {cpu: "1", memory: "1Gi"}
+  eval:
+    replicas: 1
+    port: 8000
+    servicePort: 8004
+    nodePort: 30004
+    resources:
+      requests: {cpu: "250m", memory: "512Mi"}
+      limits: {cpu: "1", memory: "1Gi"}
+
+# ADR-021: static chat/upload UI + same-origin reverse proxy (ui/Dockerfile).
+# Kubernetes observability (Prometheus/Alertmanager/Loki) is deliberately NOT
+# hand-rolled in this chart — deploy kube-prometheus-stack + loki-stack
+# alongside; the services' /metrics endpoints work with any scraper.
+ui:
+  replicas: 1
+  port: 80
+  servicePort: 8080
+  nodePort: 30080
+  resources:
+    requests: {cpu: "50m", memory: "64Mi"}
+    limits: {cpu: "200m", memory: "128Mi"}
+
+qdrant:
+  image: "qdrant/qdrant:v1.11.3"
+  port: 6333
+  storage:
+    size: "10Gi"
+    storageClassName: ""  # "" = cluster default
+
+opensearch:
+  image: "opensearchproject/opensearch:2.17.1"
+  port: 9200
+  storage:
+    size: "10Gi"
+    storageClassName: ""
+
+neo4j:
+  image: "neo4j:5.24-community"
+  httpPort: 7474
+  boltPort: 7687
+  storage:
+    size: "5Gi"
+    storageClassName: ""
+
+redis:
+  image: "redis:7-alpine"
+  port: 6379
+  # No PVC — same posture as docker-compose.yml: both the embedding cache
+  # and the rate limiter (ADR-013) tolerate a cold cache on restart.
+
+minio:
+  image: "minio/minio:RELEASE.2024-10-13T13-34-11Z"
+  apiPort: 9000
+  consolePort: 9001
+  apiNodePort: 30900
+  consoleNodePort: 30901
+  storage:
+    size: "10Gi"
+    storageClassName: ""
+
+otelCollector:
+  image: "otel/opentelemetry-collector-contrib:0.111.0"
+  httpPort: 4318
+  grpcPort: 4317
+
+tempo:
+  image: "grafana/tempo:2.6.1"
+  storage:
+    size: "5Gi"
+    storageClassName: ""
+
+grafana:
+  image: "grafana/grafana:11.2.2"
+  port: 3000
+  nodePort: 30300
+
+phoenix:
+  image: "arizephoenix/phoenix:17.26.0"
+  uiPort: 6006
+  grpcPort: 4317
+  uiNodePort: 30606
+  storage:
+    size: "5Gi"
+    storageClassName: ""

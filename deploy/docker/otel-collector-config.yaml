@@ -1,0 +1,32 @@
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  batch: {}
+
+exporters:
+  debug:
+    verbosity: basic
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+  otlp/phoenix:
+    # ADR-016: same span stream Tempo gets, fanned out to Phoenix's
+    # RAG-specific trace UI — internal Docker network address, not the
+    # host-mapped port (that's only for external/debugging access).
+    endpoint: phoenix:4317
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug, otlp/tempo, otlp/phoenix]

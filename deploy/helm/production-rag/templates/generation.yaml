@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-generation
+  labels:
+    {{- include "production-rag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: generation
+spec:
+  replicas: {{ .Values.applicationServices.generation.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: generation
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: generation
+    spec:
+      containers:
+        - name: generation
+          image: "{{ .Values.image.registry }}/generation:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            {{- include "production-rag.commonEnv" . | nindent 12 }}
+            - name: SERVICE_NAME
+              value: rag-generation
+            - name: RETRIEVAL_SERVICE_URL
+              value: "http://{{ .Release.Name }}-retrieval:{{ .Values.applicationServices.retrieval.servicePort }}"
+          ports:
+            - containerPort: {{ .Values.applicationServices.generation.port }}
+          readinessProbe:
+            httpGet: {path: /healthz, port: {{ .Values.applicationServices.generation.port }}}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          livenessProbe:
+            httpGet: {path: /healthz, port: {{ .Values.applicationServices.generation.port }}}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.applicationServices.generation.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-generation
+  labels:
+    {{- include "production-rag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: generation
+spec:
+  {{- include "production-rag.serviceType" . | nindent 2 }}
+  selector:
+    app.kubernetes.io/component: generation
+  ports:
+    - port: {{ .Values.applicationServices.generation.servicePort }}
+      targetPort: {{ .Values.applicationServices.generation.port }}
+      {{- if eq .Values.service.type "NodePort" }}
+      nodePort: {{ .Values.applicationServices.generation.nodePort }}
+      {{- end }}

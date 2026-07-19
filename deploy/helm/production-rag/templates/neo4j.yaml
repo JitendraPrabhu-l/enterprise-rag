@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-neo4j
+  labels:
+    {{- include "production-rag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: neo4j
+spec:
+  serviceName: {{ .Release.Name }}-neo4j
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: neo4j
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: neo4j
+    spec:
+      containers:
+        - name: neo4j
+          image: {{ .Values.neo4j.image }}
+          env:
+            - name: NEO4J_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: neo4j-password
+            # NEO4J_AUTH must be "user/password" in one value — Kubernetes'
+            # $(VAR) env-var interpolation only works between env vars
+            # defined in this same list, so this composes NEO4J_PASSWORD
+            # (already resolved from the secret above) with the plain
+            # username from values.yaml.
+            - name: NEO4J_AUTH
+              value: "{{ .Values.env.neo4jUser }}/$(NEO4J_PASSWORD)"
+            - name: NEO4J_PLUGINS
+              value: '["apoc"]'
+          ports:
+            - containerPort: {{ .Values.neo4j.httpPort }}
+            - containerPort: {{ .Values.neo4j.boltPort }}
+          readinessProbe:
+            httpGet: {path: /, port: {{ .Values.neo4j.httpPort }}}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /, port: {{ .Values.neo4j.httpPort }}}
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          volumeMounts:
+            - name: neo4j-storage
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: neo4j-storage
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.neo4j.storage.storageClassName }}
+        storageClassName: {{ .Values.neo4j.storage.storageClassName }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.neo4j.storage.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-neo4j
+  labels:
+    {{- include "production-rag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: neo4j
+spec:
+  selector:
+    app.kubernetes.io/component: neo4j
+  ports:
+    - name: http
+      port: {{ .Values.neo4j.httpPort }}
+      targetPort: {{ .Values.neo4j.httpPort }}
+    - name: bolt
+      port: {{ .Values.neo4j.boltPort }}
+      targetPort: {{ .Values.neo4j.boltPort }}

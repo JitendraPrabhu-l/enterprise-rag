@@ -1,0 +1,11 @@
+apiVersion: v2
+name: production-rag
+description: >
+  Production RAG stack (ADR-018) — 4 application services (ingestion,
+  ingestion-worker, retrieval, generation, eval), 5 stateful backing stores
+  (Qdrant, OpenSearch, Neo4j, Redis, MinIO), and observability
+  (otel-collector, Tempo, Grafana, Phoenix). Direct translation of the
+  project's docker-compose.yml topology.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

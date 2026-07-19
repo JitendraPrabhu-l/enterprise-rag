@@ -1,0 +1,12 @@
+# ADR-019: overrides for deploying onto the local kind cluster
+# (deploy/terraform/) — switches Services to NodePort so they're reachable
+# at localhost:<port> the same way docker-compose.yml's host port mappings
+# work. The nodePort values below must match
+# deploy/terraform/variables.tf's port_mappings.*.container_port exactly.
+#
+# Usage: helm install production-rag deploy/helm/production-rag \
+#          -f deploy/helm/production-rag/values-kind.yaml \
+#          --set secrets.groqApiKey=$GROQ_API_KEY
+
+service:
+  type: NodePort

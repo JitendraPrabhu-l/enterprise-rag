@@ -1,0 +1,50 @@
+# ADR-021: alert rules for the RAG stack. Latency thresholds are calibrated
+# to this stack's CPU-bound reality (cross-encoder rerank makes ~18s /retrieve
+# normal on CPU hosts) — they catch degradation, not cold-start noise.
+groups:
+  - name: rag-availability
+    rules:
+      - alert: ServiceDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} target is down"
+          description: "Prometheus has been unable to scrape {{ $labels.job }} ({{ $labels.instance }}) for 2 minutes."
+
+      - alert: HighErrorRate
+        expr: |
+          sum by (job) (rate(http_requests_total{status="5xx"}[5m]))
+            / sum by (job) (rate(http_requests_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} 5xx rate above 5%"
+          description: "More than 5% of {{ $labels.job }} requests returned 5xx over the last 5 minutes."
+
+  - name: rag-latency
+    rules:
+      - alert: HighP95Latency
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le, job) (rate(http_request_duration_seconds_bucket[5m]))
+          ) > 60
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.job }} p95 latency above 60s"
+          description: "p95 request latency for {{ $labels.job }} has exceeded 60s for 10 minutes — beyond normal CPU-rerank latency."
+
+  - name: rag-guardrails
+    rules:
+      - alert: GuardrailFlagSpike
+        expr: sum(rate(rag_guardrail_flags_total[15m])) > 0.1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sustained guardrail flagging in generation"
+          description: "The prompt-injection/ungroundedness guardrails are flagging >6 events/min sustained — either an active attack or a false-positive regression (ADR-010)."

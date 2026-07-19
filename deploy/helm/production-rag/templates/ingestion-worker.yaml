@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-ingestion-worker
+  labels:
+    {{- include "production-rag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ingestion-worker
+spec:
+  replicas: {{ .Values.applicationServices.ingestionWorker.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: ingestion-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: ingestion-worker
+    spec:
+      containers:
+        - name: ingestion-worker
+          image: "{{ .Values.image.registry }}/ingestion:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            {{- toYaml .Values.applicationServices.ingestionWorker.command | nindent 12 }}
+          env:
+            {{- include "production-rag.commonEnv" . | nindent 12 }}
+            - name: SERVICE_NAME
+              value: rag-ingestion-worker
+          # No Service — this workload is never addressed by name, only
+          # consumes jobs from Redis (ADR-015), same as docker-compose.yml.
+          livenessProbe:
+            exec:
+              command: ["celery", "-A", "rag_ingestion.tasks.celery_app", "inspect", "ping"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.applicationServices.ingestionWorker.resources | nindent 12 }}
+          volumeMounts:
+            - name: uploads
+              mountPath: /tmp/rag-ingestion-uploads
+      volumes:
+        - name: uploads
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-ingestion-uploads
