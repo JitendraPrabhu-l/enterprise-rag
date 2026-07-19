@@ -1,0 +1,20 @@
+# ADR-021: alert routing. The default receiver is a local webhook sink so
+# the pipeline is complete and testable end-to-end without any paid/external
+# service — swap in a slack_configs/email_configs receiver for real paging.
+# Alerts are always visible in the Alertmanager UI (http://localhost:9093)
+# and on the Grafana overview dashboard regardless of receiver.
+route:
+  receiver: default
+  group_by: [alertname, job]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  - name: default
+    webhook_configs:
+      # Points at Alertmanager's own health endpoint as a no-op sink: the
+      # POST is accepted and dropped. Replace with a real webhook/Slack/email
+      # receiver to page humans.
+      - url: http://localhost:9093/-/healthy
+        send_resolved: true

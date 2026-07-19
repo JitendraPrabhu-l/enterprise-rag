@@ -1,0 +1,264 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  lint-and-typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install tooling
+        run: pip install ruff "mypy>=1.13,<2"
+      - name: Install packages (editable, for cross-package type resolution)
+        run: |
+          pip install -e packages/rag_core
+          pip install -e services/ingestion
+          pip install -e services/retrieval
+          pip install -e services/generation
+          pip install -e services/eval
+      - name: Ruff lint
+        run: ruff check .
+      - name: Ruff format check
+        run: ruff format --check .
+      - name: mypy (rag_core)
+        run: mypy packages/rag_core/rag_core
+      - name: mypy (services)
+        run: |
+          mypy services/ingestion/rag_ingestion
+          mypy services/retrieval/rag_retrieval
+          mypy services/generation/rag_generation
+          mypy services/eval/rag_eval
+
+  security-audit:
+    # ADR-032: pip-audit against each package's locked dependency set
+    # (uv.lock, exported to requirements.txt format since pip-audit doesn't
+    # read uv's native TOML lockfile). Informational only (does not fail
+    # the build) — see the ADR for why: two known, investigated findings
+    # (starlette CVEs fixed only in a 1.x line that
+    # prometheus-fastapi-instrumentator's own constraint
+    # (starlette<1.0.0) rules out, and transformers RCE CVEs fixed only in
+    # 5.x which sentence-transformers 3.x's own constraint
+    # (transformers<5.0.0) rules out) cannot be resolved by this repo alone
+    # without dropping a real dependency, so a hard gate would permanently
+    # red the build for a condition already investigated and tracked, not
+    # ignored. Runs anyway so a NEW finding is visible immediately, and so
+    # the existing two stay visible rather than silently forgotten.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      matrix:
+        package: [rag_core, ingestion, retrieval, generation, eval]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install pip-audit
+        run: pip install pip-audit
+      - name: Export locked dependencies (rag_core)
+        if: matrix.package == 'rag_core'
+        working-directory: packages/rag_core
+        run: uv export --format requirements.txt --no-hashes --no-emit-project -o /tmp/audit-reqs.txt
+      - name: Export locked dependencies (${{ matrix.package }})
+        if: matrix.package != 'rag_core'
+        working-directory: services/${{ matrix.package }}
+        run: uv export --format requirements.txt --no-hashes --no-emit-project -o /tmp/audit-reqs.txt
+      - name: pip-audit
+        run: pip-audit -r /tmp/audit-reqs.txt
+
+  test:
+    runs-on: ubuntu-latest
+    needs: lint-and-typecheck
+    strategy:
+      matrix:
+        service: [rag_core, ingestion, retrieval, generation, eval]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install rag_core
+        run: pip install -e "packages/rag_core[dev]"
+      - name: Install service + test deps
+        if: matrix.service != 'rag_core'
+        run: pip install -e "services/${{ matrix.service }}[dev]"
+      # Coverage is reported (term-missing in the log, plus an XML artifact
+      # every run) but does not gate the build — the measured baseline
+      # varies widely by package (rag_core ~84%, retrieval ~32% at the time
+      # this was added, see docs/adr/ADR-031) and an artificial uniform
+      # floor would either be toothless for the strong packages or fail
+      # the weak ones on day one for pre-existing gaps, not a regression
+      # this PR introduced. Visibility now, a real floor once someone
+      # deliberately raises retrieval/eval's coverage to justify one.
+      - name: Run tests (rag_core)
+        if: matrix.service == 'rag_core'
+        run: >
+          pytest packages/rag_core -v
+          --cov=rag_core --cov-report=term-missing --cov-report=xml
+      - name: Run tests (service)
+        if: matrix.service != 'rag_core'
+        run: >
+          pytest services/${{ matrix.service }}/tests -v
+          --cov=rag_${{ matrix.service }} --cov-report=term-missing --cov-report=xml
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.service }}
+          path: coverage.xml
+          if-no-files-found: warn
+
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      matrix:
+        service: [ingestion, retrieval, generation, eval]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ${{ matrix.service }} image
+        run: docker build -f services/${{ matrix.service }}/Dockerfile -t rag-${{ matrix.service }}:ci .
+
+  eval-gate:
+    runs-on: ubuntu-latest
+    needs: docker-build
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bring up full stack
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: docker compose up -d --build
+      - name: Wait for services to become healthy
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8003/healthz && curl -sf http://localhost:8004/healthz; then
+              echo "services healthy"; exit 0
+            fi
+            sleep 5
+          done
+          echo "services did not become healthy in time" >&2
+          docker compose logs
+          exit 1
+      - name: Run RAG Triad eval gate
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          python -m pip install -e packages/rag_core -e services/eval
+          python services/eval/scripts/run_eval_gate.py \
+            --dataset services/eval/fixtures/synthetic_eval_set.json \
+            --generation-url http://localhost:8003 \
+            --retrieval-url http://localhost:8002 \
+            --output eval-results.json
+      - name: Run Ragas eval (ADR-017, informational — never fails the build)
+        continue-on-error: true
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          python -m venv /tmp/ragas-venv
+          /tmp/ragas-venv/bin/pip install -q -r services/eval/ragas-requirements.txt
+          /tmp/ragas-venv/bin/python services/eval/scripts/run_ragas_eval.py \
+            --dataset services/eval/fixtures/synthetic_eval_set.json \
+            --generation-url http://localhost:8003 \
+            --retrieval-url http://localhost:8002 \
+            --output ragas-results.json
+      - name: Upload Ragas results as an artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ragas-eval-results
+          path: ragas-results.json
+          if-no-files-found: ignore
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  deploy:
+    # ADR-018/ADR-019: pushes each app service image to GHCR, then proves
+    # the Helm chart against a real (if disposable) Kubernetes API server —
+    # a kind cluster provisioned by this repo's own Terraform config, not a
+    # mock. Only runs on main (not every PR) since it publishes images.
+    runs-on: ubuntu-latest
+    needs: docker-build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    env:
+      REGISTRY: ghcr.io
+      IMAGE_BASE: ghcr.io/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push application images
+        run: |
+          for service in ingestion retrieval generation eval; do
+            docker build -f services/$service/Dockerfile \
+              -t ${{ env.IMAGE_BASE }}/$service:${{ github.sha }} \
+              -t ${{ env.IMAGE_BASE }}/$service:latest \
+              .
+            docker push ${{ env.IMAGE_BASE }}/$service:${{ github.sha }}
+            docker push ${{ env.IMAGE_BASE }}/$service:latest
+          done
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: Install kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      - name: Provision kind cluster (ADR-019)
+        working-directory: deploy/terraform
+        run: |
+          terraform init
+          terraform apply -auto-approve
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "v3.16.2"
+
+      - name: Deploy Helm chart onto the kind cluster (ADR-018)
+        env:
+          KUBECONFIG: deploy/terraform/kubeconfig
+        run: |
+          helm install production-rag deploy/helm/production-rag \
+            -f deploy/helm/production-rag/values-kind.yaml \
+            --set image.registry=${{ env.IMAGE_BASE }} \
+            --set image.tag=${{ github.sha }} \
+            --set secrets.groqApiKey=${{ secrets.GROQ_API_KEY }} \
+            --wait --timeout 5m
+
+      - name: Verify pods are healthy
+        if: always()
+        env:
+          KUBECONFIG: deploy/terraform/kubeconfig
+        run: kubectl get pods -o wide
+
+      - name: Tear down kind cluster
+        if: always()
+        working-directory: deploy/terraform
+        run: terraform destroy -auto-approve
