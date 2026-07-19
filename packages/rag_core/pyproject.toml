@@ -1,0 +1,75 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rag-core"
+version = "0.1.0"
+description = "Shared schemas, config, tracing, and clients for the Production RAG stack"
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2.7,<3",
+  "pydantic-settings>=2.3,<3",
+  "opentelemetry-api>=1.25,<2",
+  "opentelemetry-sdk>=1.25,<2",
+  "opentelemetry-exporter-otlp-proto-http>=1.25,<2",
+  "structlog>=24.1,<25",
+  "qdrant-client>=1.9,<2",
+  "tenacity>=8.3,<9",
+  # OpenAI-compatible client — used against Groq (every LLM role: generation,
+  # vision, utility) via base_url override; no Anthropic SDK needed.
+  "openai>=1.40,<2",
+  # ADR-013: embedding cache + rate limiting backend, shared by every service.
+  "redis>=5.0,<6",
+  "fastapi-limiter>=0.2,<1",
+  "pyrate-limiter>=4.0,<5",
+  # ADR-021: /metrics on every service. fastapi made explicit since
+  # rag_core.metrics/rate_limit import it directly (previously only implied
+  # via fastapi-limiter).
+  "fastapi>=0.111,<1",
+  "prometheus-fastapi-instrumentator>=7.0,<8",
+  # Transitive dep of qdrant-client/sentence-transformers. Pinned below 2.5: numpy's
+  # bundled .pyi stubs at 2.5+ use PEP 695 `type` statements unconditionally, which
+  # breaks mypy strict-mode checking of any file that imports numpy transitively,
+  # independent of this project's own `python_version` target.
+  "numpy<2.5",
+]
+
+[project.optional-dependencies]
+# ADR-020: rag_core.sparse_search is shared by retrieval (BM25 search) and
+# ingestion (bulk indexing) — an extra rather than a core dependency so
+# generation/eval, which never import that module, don't carry opensearch-py.
+opensearch = ["opensearch-py[async]>=2.6,<3"]
+dev = [
+  "pytest>=8.2,<9",
+  "pytest-asyncio>=0.23,<1",
+  "pytest-mock>=3.14,<4",
+  "pytest-cov>=5.0,<6",
+  "mypy>=1.13,<2",
+  "ruff>=0.5,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["rag_core"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4"]
+# UP042: str+Enum (not enum.StrEnum) is intentional here — every downstream service
+# constructs these enums from raw strings (e.g. ContentModality(payload["modality"]))
+# and relies on str, Enum's exact serialization behavior; StrEnum is equivalent on
+# 3.11 but the migration isn't worth the risk this late against four already-tested
+# consumers.
+ignore = ["UP042"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
