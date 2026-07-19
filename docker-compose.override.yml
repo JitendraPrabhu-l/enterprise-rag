@@ -1,0 +1,32 @@
+services:
+  ingestion:
+    volumes:
+      - ./services/ingestion/rag_ingestion:/app/rag_ingestion:ro
+      - ./packages/rag_core/rag_core:/app/rag_core:ro
+    # No --reload here: ingestion does the heaviest per-request memory work in
+    # the stack (embedding, chunking, optional vision calls), and uvicorn's
+    # --reload spawns a watchfiles file-watcher process that competes for
+    # memory with that work. Under host memory pressure this has reproducibly
+    # crashed the whole worker mid-request (WatchfilesRustInternalError:
+    # "Cannot allocate memory") rather than just slowing it down. Source
+    # changes still take effect on container restart; they just aren't
+    # picked up live.
+    command: ["python", "-m", "uvicorn", "rag_ingestion.api:app", "--host", "0.0.0.0", "--port", "8000"]
+
+  retrieval:
+    volumes:
+      - ./services/retrieval/rag_retrieval:/app/rag_retrieval:ro
+      - ./packages/rag_core/rag_core:/app/rag_core:ro
+    command: ["python", "-m", "uvicorn", "rag_retrieval.api:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+  generation:
+    volumes:
+      - ./services/generation/rag_generation:/app/rag_generation:ro
+      - ./packages/rag_core/rag_core:/app/rag_core:ro
+    command: ["python", "-m", "uvicorn", "rag_generation.api:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+  eval:
+    volumes:
+      - ./services/eval/rag_eval:/app/rag_eval:ro
+      - ./packages/rag_core/rag_core:/app/rag_core:ro
+    command: ["python", "-m", "uvicorn", "rag_eval.api:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
