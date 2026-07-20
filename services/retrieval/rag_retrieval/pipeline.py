@@ -77,6 +77,16 @@ def _chunk_from_dense_hit(hit: dict[str, Any]) -> tuple[str, RetrievedChunk]:
         uri=metadata_payload.get("uri"),
         last_updated_epoch=metadata_payload["last_updated_epoch"],
         page_count=metadata_payload.get("page_count"),
+        # ADR-034 fields: .get() with model defaults so pre-ADR-034 points
+        # (which lack them) reconstruct as the current, v1, un-superseded
+        # documents they effectively are.
+        is_current=metadata_payload.get("is_current", True),
+        document_version=metadata_payload.get("document_version", 1),
+        superseded_by_document_id=metadata_payload.get("superseded_by_document_id"),
+        content_hash=metadata_payload.get("content_hash"),
+        embedding_model_version=metadata_payload.get("embedding_model_version"),
+        valid_from_epoch=metadata_payload.get("valid_from_epoch"),
+        valid_until_epoch=metadata_payload.get("valid_until_epoch"),
         extra=metadata_payload.get("extra", {}),
     )
     chunk = ChunkRecord(
@@ -153,6 +163,9 @@ class RetrievalPipeline:
         graph_client: GraphQueryClient | None,
         rrf_k: int,
         tracer: Tracer,
+        corrective_enabled: bool = False,
+        corrective_confidence_floor: float = 0.0,
+        corrective_max_retries: int = 2,
     ) -> None:
         self._vector_store = vector_store
         self._sparse_client = sparse_client
@@ -163,6 +176,9 @@ class RetrievalPipeline:
         self._graph_classifier = QueryClassifier()
         self._rrf_k = rrf_k
         self._tracer = tracer
+        self._corrective_enabled = corrective_enabled
+        self._corrective_confidence_floor = corrective_confidence_floor
+        self._corrective_max_retries = corrective_max_retries
 
     async def _hybrid_search_one(
         self,
@@ -172,14 +188,16 @@ class RetrievalPipeline:
         tenant_id: str,
         top_k: int,
         principals: list[str] | None = None,
+        include_superseded: bool = False,
     ) -> tuple[list[str], list[str], dict[str, RetrievedChunk]]:
         """Run dense + sparse search for a single query variant.
 
         Returns `(dense_id_ranking, sparse_id_ranking, chunks_by_id)` — the
         rankings feed RRF, and `chunks_by_id` is merged across all variants
         so the pipeline never has to re-fetch a chunk it already has.
-        Tenancy (ADR-010) and principal ACLs (ADR-024) are threaded into
-        BOTH legs — neither store is ever searched without them.
+        Tenancy (ADR-010), principal ACLs (ADR-024), and currency (ADR-034)
+        are threaded into BOTH legs — neither store is ever searched without
+        them.
         """
         with self._tracer.start_as_current_span("retrieval.dense_search"):
             dense_hits = await self._vector_store.search(
@@ -188,6 +206,7 @@ class RetrievalPipeline:
                 tenant_id=tenant_id,
                 top_k=top_k,
                 principals=principals,
+                include_superseded=include_superseded,
             )
         with self._tracer.start_as_current_span("retrieval.sparse_search"):
             sparse_hits = await self._sparse_client.search(
@@ -196,6 +215,7 @@ class RetrievalPipeline:
                 tenant_id=tenant_id,
                 top_k=top_k,
                 principals=principals,
+                include_superseded=include_superseded,
             )
 
         chunks_by_id: dict[str, RetrievedChunk] = {}
@@ -260,7 +280,90 @@ class RetrievalPipeline:
             f"unknown query_strategy {query_strategy!r}, expected one of {ALL_STRATEGIES}"
         )
 
+    # Escalation ladder for the corrective loop (ADR-038): each rung is a
+    # progressively more aggressive retrieval strategy. `direct` is one dense+
+    # sparse pass; `multi_query` casts a wider net with paraphrases; `decompose`
+    # splits multi-fact questions so every entity gets retrieved. When a pass
+    # grades insufficient, the loop climbs to the next rung it hasn't tried.
+    _CORRECTIVE_LADDER = ("direct", "multi_query", "decompose")
+
+    def _is_sufficient(self, results: list[RetrievedChunk]) -> bool:
+        """CRAG-style deterministic sufficiency check (ADR-038): is the best
+        cross-encoder rerank score at or above the confidence floor.
+
+        Uses the reranker's own (query, passage) score already computed this
+        pass — no extra model call. Empty results, or a top score below the
+        floor, means "retrieval didn't clearly find the answer" and a
+        corrective retry is warranted. Falls back to True when no rerank score
+        is present (e.g. reranking disabled) so the loop never spins on a
+        missing signal.
+        """
+        if not results:
+            return False
+        top_score = results[0].rerank_score
+        if top_score is None:
+            return True
+        return top_score >= self._corrective_confidence_floor
+
     async def retrieve(
+        self,
+        request: QueryRequest,
+        query_strategy: str = "direct",
+    ) -> list[RetrievedChunk]:
+        """Retrieve for `request`, correctively retrying weak results (ADR-038).
+
+        Runs one full retrieval pass; if the corrective loop is enabled and the
+        result grades insufficient (`_is_sufficient`), escalates the query
+        strategy up `_CORRECTIVE_LADDER` and retries, up to
+        `corrective_max_retries` times, keeping the best-scoring result seen.
+        With the loop disabled this is exactly one `_retrieve_once` call — the
+        pre-ADR-038 behavior — so nothing changes for callers who turn it off.
+        """
+        first = await self._retrieve_once(request, query_strategy)
+        if not self._corrective_enabled or self._is_sufficient(first):
+            return first
+
+        best = first
+        best_score = self._top_score(first)
+        # Try each ladder rung not already used, up to the retry cap.
+        tried = {query_strategy}
+        attempts = 0
+        for next_strategy in self._CORRECTIVE_LADDER:
+            if attempts >= self._corrective_max_retries:
+                break
+            if next_strategy in tried:
+                continue
+            tried.add(next_strategy)
+            attempts += 1
+            logger.info(
+                "pipeline.corrective_retry",
+                request_id=str(request.request_id),
+                from_strategy=query_strategy,
+                to_strategy=next_strategy,
+                attempt=attempts,
+                best_score=best_score,
+            )
+            with self._tracer.start_as_current_span("retrieval.corrective_retry") as span:
+                span.set_attribute("corrective.strategy", next_strategy)
+                span.set_attribute("corrective.attempt", attempts)
+                candidate = await self._retrieve_once(request, next_strategy)
+            candidate_score = self._top_score(candidate)
+            if candidate_score > best_score:
+                best, best_score = candidate, candidate_score
+            if self._is_sufficient(candidate):
+                # Good enough — stop climbing the ladder.
+                return candidate
+        return best
+
+    @staticmethod
+    def _top_score(results: list[RetrievedChunk]) -> float:
+        """Best rerank score in a result set, for comparing corrective passes.
+        -inf for an empty set so any real pass beats 'found nothing'."""
+        if not results:
+            return float("-inf")
+        return results[0].rerank_score if results[0].rerank_score is not None else float("-inf")
+
+    async def _retrieve_once(
         self,
         request: QueryRequest,
         query_strategy: str = "direct",
@@ -300,6 +403,7 @@ class RetrievalPipeline:
                 tenant_id=request.tenant_id,
                 top_k=top_k,
                 principals=request.principals,
+                include_superseded=request.include_superseded,
             )
             for i in range(len(query_texts))
         ]

@@ -33,3 +33,26 @@ class RetrievalSettings(BaseServiceSettings):
     """Number of paraphrased variations to generate for multi_query strategy."""
 
     utility_model_max_tokens: int = 512
+
+    # --- Corrective retrieval loop (ADR-038, CRAG-style) ---
+    corrective_retrieval_enabled: bool = True
+    """When on, retrieval grades its own top result and, if the best
+    cross-encoder rerank score is below `corrective_confidence_floor`,
+    escalates the query strategy and retries (ADR-038). Turns a single static
+    retrieve→rerank pass into a bounded self-correcting loop: weak retrieval
+    is caught and re-attempted at serve time instead of quietly feeding a
+    thin context to the generator. Disable to force exactly one pass."""
+
+    corrective_confidence_floor: float = 0.0
+    """Cross-encoder score below which the top result is deemed insufficient
+    and a corrective retry fires. bge-reranker-base emits logits centered near
+    0 (positive = relevant, negative = not), so 0.0 is a sensible "the best
+    thing we found isn't clearly relevant" boundary. Raise to correct more
+    aggressively (more retries, higher cost); lower to correct only on the
+    truly weak."""
+
+    corrective_max_retries: int = 2
+    """Max corrective re-retrievals after the initial pass (ADR-038). Capped —
+    the CRAG/self-RAG literature converges on a small bound (≤5-6) so a
+    genuinely unanswerable query can't loop forever; 2 escalations (e.g.
+    direct → multi_query → decompose) is the practical sweet spot here."""

@@ -41,3 +41,23 @@ class SyntheticEvalItem(BaseModel):
     reference_context: str = Field(min_length=1)
     reference_answer: str = Field(min_length=1)
     source_document_id: str = Field(min_length=1)
+
+
+class GoldenRetrievalItem(BaseModel):
+    """One query with its known-relevant chunk ids for the deterministic,
+    LLM-free retrieval gate (ADR-037).
+
+    Unlike SyntheticEvalItem (which judges the final *answer* via an LLM), this
+    marks which chunk_ids retrieval *should* surface for a query, so
+    recall@k / MRR / nDCG can be computed with no model in the loop. Seed it
+    from production thumbs-down feedback (ADR-027) — real misses — as well as
+    synthetic questions, so the gate hardens against failures that actually
+    happened, not only ones imagined at design time.
+    """
+
+    query: str = Field(min_length=1)
+    relevant_chunk_ids: list[str] = Field(
+        min_length=1, description="chunk_ids a correct retrieval must surface for this query."
+    )
+    tenant_id: str = "public"
+    source_domains: list[str] | None = None

@@ -18,7 +18,13 @@ from __future__ import annotations
 
 import structlog
 from rag_core.metrics import GUARDRAIL_FLAGS, SEMANTIC_CACHE
-from rag_core.schemas import GenerationResponse, QueryRequest, RetrievedChunk
+from rag_core.schemas import (
+    AnswerProvenance,
+    Citation,
+    GenerationResponse,
+    QueryRequest,
+    RetrievedChunk,
+)
 from rag_core.semantic_cache import SemanticAnswerCache
 from rag_core.tracing import get_tracer
 
@@ -37,6 +43,39 @@ from rag_generation.retrieval_client import RetrievalClient
 
 logger = structlog.get_logger(__name__)
 tracer = get_tracer(__name__)
+
+
+def _build_provenance(
+    citations: list[Citation], context_chunks: list[RetrievedChunk]
+) -> AnswerProvenance:
+    """Assemble the ADR-034 provenance stamp from the chunks an answer cited.
+
+    Keys the retrieved context by parent_id, then walks the (grounded)
+    citations to collect the distinct embedding-model versions, per-document
+    versions, and content hashes standing behind the cited evidence. Pre-
+    ADR-034 chunks contribute nothing (their version fields are None) rather
+    than erroring — a partially-migrated corpus still produces a valid, if
+    sparser, stamp.
+    """
+    by_parent: dict[str, RetrievedChunk] = {c.parent.parent_id: c for c in context_chunks}
+    model_versions: set[str] = set()
+    content_hashes: set[str] = set()
+    doc_versions: dict[str, int] = {}
+    for citation in citations:
+        cited = by_parent.get(citation.parent_id)
+        if cited is None:
+            continue
+        meta = cited.chunk.metadata
+        if meta.embedding_model_version:
+            model_versions.add(meta.embedding_model_version)
+        if meta.content_hash:
+            content_hashes.add(meta.content_hash)
+        doc_versions[meta.document_id] = meta.document_version
+    return AnswerProvenance(
+        embedding_model_versions=sorted(model_versions),
+        document_versions=doc_versions,
+        content_hashes=sorted(content_hashes),
+    )
 
 
 class GenerationPipeline:
@@ -225,6 +264,15 @@ class GenerationPipeline:
             )
             guardrail_flagged = True
 
+        # ADR-034: stamp the answer with the version/provenance of the chunks
+        # it actually cited — the "which index version produced this answer"
+        # audit trail. Built from cited parent_ids (not the whole retrieved
+        # set) so it reflects the evidence the model was actually attributed
+        # to, and computed here on the serve path so it is present on every
+        # fresh answer (cache replays carry the original stamp forward).
+        provenance = _build_provenance(response.citations, context_chunks)
+
+        update: dict[str, object] = {"provenance": provenance}
         if guardrail_flagged:
-            response = response.model_copy(update={"guardrail_flagged": True})
-        return response
+            update["guardrail_flagged"] = True
+        return response.model_copy(update=update)

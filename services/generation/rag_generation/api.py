@@ -64,6 +64,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             settings.redis_url,
             similarity_threshold=settings.semantic_cache_similarity_threshold,
             ttl_seconds=settings.semantic_cache_ttl_seconds,
+            acl_policy_version=settings.semantic_cache_acl_policy_version,
         )
         cache_embedder = CacheKeyEmbedder(settings.semantic_cache_embedding_model)
 

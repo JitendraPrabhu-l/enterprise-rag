@@ -105,6 +105,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         graph_client=graph_client,
         rrf_k=settings.rrf_k,
         tracer=tracer,
+        corrective_enabled=settings.corrective_retrieval_enabled,
+        corrective_confidence_floor=settings.corrective_confidence_floor,
+        corrective_max_retries=settings.corrective_max_retries,
     )
 
     _state.pipeline = pipeline

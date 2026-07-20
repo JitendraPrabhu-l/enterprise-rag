@@ -88,3 +88,13 @@ class GenerationSettings(BaseServiceSettings):
     retrieval/ingestion use, so 'semantically identical' means the same thing
     here as in retrieval. Loaded once; CPU inference is cheap for single
     queries."""
+
+    semantic_cache_acl_policy_version: str = "1"
+    """ADR-035: authorization epoch folded into every cache scope key. Bump
+    this (any new value) whenever an access-control change lands that could
+    make previously cached answers unsafe to serve — a document's
+    allowed_principals tightened, a group's membership revoked upstream — and
+    every answer cached under the old policy is atomically stranded in a dead
+    namespace to expire unread, instead of being served to a caller who has
+    since lost access. Cheap, coarse, and correct: a global re-namespace beats
+    trying to selectively invalidate the exact affected entries."""
