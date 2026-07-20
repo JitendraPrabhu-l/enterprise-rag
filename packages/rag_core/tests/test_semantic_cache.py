@@ -100,31 +100,40 @@ class TestScopeKeyIsolation:
     servable to a caller who could have retrieved the same documents."""
 
     def test_different_tenants_get_different_scope_keys(self) -> None:
-        a = _scope_key("tenant-a", ["public"], None)
-        b = _scope_key("tenant-b", ["public"], None)
+        a = _scope_key("tenant-a", ["public"], None, "1")
+        b = _scope_key("tenant-b", ["public"], None, "1")
         assert a != b
 
     def test_different_principals_get_different_scope_keys(self) -> None:
-        a = _scope_key("t", ["user:alice"], None)
-        b = _scope_key("t", ["user:bob"], None)
+        a = _scope_key("t", ["user:alice"], None, "1")
+        b = _scope_key("t", ["user:bob"], None, "1")
         assert a != b
 
     def test_different_source_domains_get_different_scope_keys(self) -> None:
-        a = _scope_key("t", ["public"], ["sec-filings"])
-        b = _scope_key("t", ["public"], ["arxiv-cs"])
+        a = _scope_key("t", ["public"], ["sec-filings"], "1")
+        b = _scope_key("t", ["public"], ["arxiv-cs"], "1")
         assert a != b
 
     def test_principal_order_does_not_matter(self) -> None:
         """The caller's group memberships may arrive in any order — the
         scope must not fragment across equivalent principal sets."""
-        a = _scope_key("t", ["group:eng", "user:alice"], None)
-        b = _scope_key("t", ["user:alice", "group:eng"], None)
+        a = _scope_key("t", ["group:eng", "user:alice"], None, "1")
+        b = _scope_key("t", ["user:alice", "group:eng"], None, "1")
         assert a == b
 
     def test_domain_order_does_not_matter(self) -> None:
-        a = _scope_key("t", ["public"], ["a", "b"])
-        b = _scope_key("t", ["public"], ["b", "a"])
+        a = _scope_key("t", ["public"], ["a", "b"], "1")
+        b = _scope_key("t", ["public"], ["b", "a"], "1")
         assert a == b
+
+    def test_different_acl_policy_version_gets_different_scope_key(self) -> None:
+        """ADR-035: bumping the ACL policy version re-namespaces the scope, so
+        an authorization change strands every answer cached under the old
+        policy — the same caller/scope with a new version can't hit old
+        entries."""
+        a = _scope_key("t", ["user:alice"], None, "1")
+        b = _scope_key("t", ["user:alice"], None, "2")
+        assert a != b
 
 
 @pytest.mark.asyncio

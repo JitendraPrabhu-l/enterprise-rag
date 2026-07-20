@@ -72,6 +72,48 @@ class DocumentMetadata(BaseModel):
     uri: str | None = None
     last_updated_epoch: int
     page_count: int | None = None
+    # Freshness / versioning / supersession (ADR-034). The single most
+    # common production-RAG failure is "similarity is not authority": a
+    # stale-but-similar document out-ranks current guidance and answers
+    # confidently from a superseded policy. These fields make currency a
+    # first-class, filterable property so retrieval can default to current
+    # content, and give every answer an auditable "which version produced
+    # this" trail (the EU AI Act documentation requirement for high-risk
+    # systems). All optional/defaulted so pre-ADR-034 points still index and
+    # retrieve unchanged.
+    is_current: bool = Field(
+        default=True,
+        description="Whether this document is the current, non-superseded version. "
+        "Retrieval defaults to is_current=true (ADR-034) unless the caller opts "
+        "into historical content via QueryRequest.include_superseded.",
+    )
+    document_version: int = Field(
+        default=1, ge=1, description="Monotonic version of this logical document."
+    )
+    superseded_by_document_id: str | None = Field(
+        default=None,
+        description="If this version was replaced, the document_id that replaced it — "
+        "the supersession trail retrieval and audit both read.",
+    )
+    content_hash: str | None = Field(
+        default=None,
+        description="Stable hash of the source content (ADR-036 dedup key + answer "
+        "provenance stamp). None for pre-ADR-034 points.",
+    )
+    embedding_model_version: str | None = Field(
+        default=None,
+        description="Identifier of the embedding model that produced this chunk's "
+        "vector — the re-embedding trigger (ADR-036) and half of the answer "
+        "provenance stamp. None for pre-ADR-034 points.",
+    )
+    valid_from_epoch: int | None = Field(
+        default=None, description="Unix epoch the document became effective, if known."
+    )
+    valid_until_epoch: int | None = Field(
+        default=None,
+        description="Unix epoch the document stops being effective, if known — "
+        "an expiry a time-aware retrieval filter can enforce.",
+    )
     extra: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -162,6 +204,12 @@ class QueryRequest(BaseModel):
     top_k: int = Field(default=40, ge=1, le=200)
     top_n: int = Field(default=5, ge=1, le=20)
     use_graph: bool = False
+    # ADR-034: retrieval defaults to current documents only. A caller who
+    # genuinely wants historical/superseded content (audit, "what did the
+    # policy say last year") opts in explicitly — the safe default is that a
+    # superseded document never silently out-ranks the version that replaced
+    # it.
+    include_superseded: bool = False
 
 
 class Citation(BaseModel):
@@ -172,6 +220,24 @@ class Citation(BaseModel):
     page_number: int | None = None
 
 
+class AnswerProvenance(BaseModel):
+    """The "which index version produced this answer" audit stamp (ADR-034).
+
+    Populated by the generation pipeline from the chunks an answer actually
+    cited — the embedding-model versions and content hashes behind those
+    chunks. This is the EU AI Act documentation trail for high-risk systems:
+    given a past answer, you can prove exactly which document versions and
+    which embedding model stood behind it, and detect after the fact if the
+    corpus or model has since moved on.
+    """
+
+    embedding_model_versions: list[str] = Field(default_factory=list)
+    document_versions: dict[str, int] = Field(
+        default_factory=dict, description="document_id -> document_version of cited docs."
+    )
+    content_hashes: list[str] = Field(default_factory=list)
+
+
 class GenerationResponse(BaseModel):
     request_id: UUID
     answer: str
@@ -179,6 +245,9 @@ class GenerationResponse(BaseModel):
     model: str
     used_graph: bool = False
     guardrail_flagged: bool = False
+    # ADR-034 provenance stamp. Optional so cached/older responses and tests
+    # that construct a response directly stay valid; the pipeline fills it in.
+    provenance: AnswerProvenance | None = None
 
 
 class AnswerFeedback(BaseModel):

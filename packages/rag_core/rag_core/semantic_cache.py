@@ -8,13 +8,22 @@ alone. The whole hybrid-search + rerank + generate path is skipped on a hit.
 
 How it works, and why each choice:
 
-- Keyed by (tenant_id, principals, source_domains) BEFORE similarity is ever
-  considered — a cached answer is only eligible for a caller who could have
-  retrieved the same documents. This is the load-bearing correctness rule:
-  serving a cached answer across an ACL/tenant boundary would leak content
-  the second caller may not see (ADR-024). The scope is hashed into the
-  Redis key namespace, so cross-scope hits are structurally impossible, not
-  merely filtered out.
+- Keyed by (tenant_id, principals, source_domains, acl_policy_version) BEFORE
+  similarity is ever considered — a cached answer is only eligible for a
+  caller who could have retrieved the same documents. This is the
+  load-bearing correctness rule: serving a cached answer across an ACL/tenant
+  boundary would leak content the second caller may not see (ADR-024). The
+  scope is hashed into the Redis key namespace, so cross-scope hits are
+  structurally impossible, not merely filtered out.
+- The acl_policy_version (ADR-035) closes a subtler leak the scope key alone
+  does not: a caller keeps the SAME principals string after an authorization
+  change (e.g. a document's allowed_principals is tightened, or a group's
+  membership is revoked upstream), so the scope key is unchanged and a
+  now-stale cached answer — computed when the caller could still see the
+  document — would keep being served. Folding a monotonically-bumped ACL
+  policy version into the key means any authorization change atomically
+  invalidates every answer cached under the old policy: the new version
+  hashes to a fresh namespace, and the stale entries simply expire unread.
 - Within a scope, candidate query embeddings are compared by cosine
   similarity; a hit requires >= `similarity_threshold` (default 0.95, the
   value production writeups converge on — high enough that paraphrases match
@@ -52,15 +61,23 @@ _DEFAULT_THRESHOLD = 0.95
 _DEFAULT_MAX_ENTRIES = 128
 
 
-def _scope_key(tenant_id: str, principals: list[str], source_domains: list[str] | None) -> str:
+def _scope_key(
+    tenant_id: str,
+    principals: list[str],
+    source_domains: list[str] | None,
+    acl_policy_version: str,
+) -> str:
     """Namespace a cache bucket by everything that governs what a caller may
     retrieve. Principals and domains are sorted so equivalent sets collapse
-    to one bucket regardless of order."""
+    to one bucket regardless of order. The acl_policy_version (ADR-035) is
+    part of the scope so any authorization change bumps the namespace and
+    strands every answer cached under the old policy (see module docstring)."""
     scope = json.dumps(
         {
             "t": tenant_id,
             "p": sorted(set(principals)),
             "d": sorted(set(source_domains)) if source_domains else None,
+            "av": acl_policy_version,
         },
         separators=(",", ":"),
     )
@@ -89,6 +106,7 @@ class SemanticAnswerCache:
         similarity_threshold: float = _DEFAULT_THRESHOLD,
         ttl_seconds: int = _DEFAULT_TTL_SECONDS,
         max_entries_per_scope: int = _DEFAULT_MAX_ENTRIES,
+        acl_policy_version: str = "1",
     ) -> None:
         self._client: redis.Redis = redis.from_url(  # type: ignore[no-untyped-call]
             redis_url, decode_responses=True
@@ -96,6 +114,11 @@ class SemanticAnswerCache:
         self._threshold = similarity_threshold
         self._ttl_seconds = ttl_seconds
         self._max_entries = max_entries_per_scope
+        # ADR-035: bump this (via SEMANTIC_CACHE_ACL_POLICY_VERSION) whenever an
+        # authorization change lands that could invalidate previously cached
+        # answers — it re-namespaces every scope, so stale entries are never
+        # served again and just expire on their TTL.
+        self._acl_policy_version = acl_policy_version
 
     async def lookup(
         self,
@@ -107,7 +130,7 @@ class SemanticAnswerCache:
     ) -> GenerationResponse | None:
         """Return a cached answer whose query is >= threshold-similar within
         this caller's scope, or None. Fails open (returns None) on any error."""
-        key = _scope_key(tenant_id, principals, source_domains)
+        key = _scope_key(tenant_id, principals, source_domains, self._acl_policy_version)
         try:
             # redis-py's stubs type lrange as returning `Awaitable[list] |
             # list` rather than always-awaitable — same untyped-stub gap as
@@ -156,7 +179,7 @@ class SemanticAnswerCache:
         other callers as if it were trustworthy."""
         if response.guardrail_flagged:
             return
-        key = _scope_key(tenant_id, principals, source_domains)
+        key = _scope_key(tenant_id, principals, source_domains, self._acl_policy_version)
         entry = json.dumps(
             {"embedding": query_embedding, "response": response.model_dump(mode="json")},
             separators=(",", ":"),

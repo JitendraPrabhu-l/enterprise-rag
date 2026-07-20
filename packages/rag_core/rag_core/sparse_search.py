@@ -60,6 +60,7 @@ INDEX_MAPPING: dict[str, Any] = {
             "access_role": {"type": "keyword"},
             "source_domain": {"type": "keyword"},
             "allowed_principals": {"type": "keyword"},  # ADR-024 ACL pre-filter
+            "is_current": {"type": "boolean"},  # ADR-034 currency pre-filter
         }
     },
     "settings": {
@@ -97,6 +98,7 @@ def chunk_to_sparse_doc(chunk: ChunkRecord) -> dict[str, Any]:
         "access_role": chunk.metadata.access_role.value,
         "source_domain": chunk.metadata.source_domain,
         "allowed_principals": chunk.metadata.allowed_principals,  # ADR-024
+        "is_current": chunk.metadata.is_current,  # ADR-034 currency pre-filter
     }
 
 
@@ -173,20 +175,24 @@ class SparseSearchClient:
 
     @staticmethod
     def _build_query(
-        query: str, tenant_id: str, principals: list[str] | None = None
+        query: str,
+        tenant_id: str,
+        principals: list[str] | None = None,
+        include_superseded: bool = False,
     ) -> dict[str, Any]:
-        """Build the OpenSearch query body with tenancy (ADR-010) and principal
-        ACLs (ADR-024) as hard `bool.filter` clauses.
+        """Build the OpenSearch query body with tenancy (ADR-010), principal
+        ACLs (ADR-024), and currency (ADR-034) as hard `bool.filter` clauses.
 
         `filter` context (not `should`) is what makes these hard pre-filters:
         they participate in document selection but not scoring, and —
         critically — are mandatory, unlike `should` clauses which only
         influence ranking and can be satisfied by zero matches.
 
-        The ACL clause mirrors rag_core.vector_store.build_acl_filter exactly:
-        caller-holds-any-allowed-principal, with documents indexed before the
-        field existed staying tenant-visible (their pre-ACL behavior), and an
-        empty principals list degrading to the "public" sentinel (fail-closed).
+        The ACL and currency clauses mirror rag_core.vector_store.build_acl_filter
+        exactly: caller-holds-any-allowed-principal and is-current-or-legacy,
+        with documents indexed before each field existed staying visible
+        (their pre-feature behavior), and an empty principals list degrading
+        to the "public" sentinel (fail-closed).
         """
         effective = [p for p in (principals or []) if p.strip()] or ["public"]
         acl_clause = {
@@ -198,11 +204,27 @@ class SparseSearchClient:
                 "minimum_should_match": 1,
             }
         }
+        filters: list[dict[str, Any]] = [{"term": {"tenant_id": tenant_id}}, acl_clause]
+        if not include_superseded:
+            # is_current=true OR the field is absent (pre-ADR-034 docs) — only
+            # a document actively marked stale is filtered out, mirroring the
+            # dense side's IsEmpty backward-compat branch.
+            filters.append(
+                {
+                    "bool": {
+                        "should": [
+                            {"term": {"is_current": True}},
+                            {"bool": {"must_not": [{"exists": {"field": "is_current"}}]}},
+                        ],
+                        "minimum_should_match": 1,
+                    }
+                }
+            )
         return {
             "query": {
                 "bool": {
                     "must": [{"match": {"text": {"query": query}}}],
-                    "filter": [{"term": {"tenant_id": tenant_id}}, acl_clause],
+                    "filter": filters,
                 }
             }
         }
@@ -220,15 +242,16 @@ class SparseSearchClient:
         tenant_id: str,
         top_k: int,
         principals: list[str] | None = None,
+        include_superseded: bool = False,
     ) -> list[dict[str, Any]]:
         """BM25 search across the given source domains, hard-filtered by
-        tenant_id and principal ACLs (ADR-024).
+        tenant_id, principal ACLs (ADR-024), and currency (ADR-034).
 
         Returns a list of dicts with `id`, `score`, and `source` (the indexed
         document body), sorted by BM25 score descending, truncated to top_k.
         Missing indices (domain never ingested yet) are skipped, not errors.
         """
-        body = self._build_query(query, tenant_id, principals)
+        body = self._build_query(query, tenant_id, principals, include_superseded)
         results: list[dict[str, Any]] = []
 
         for domain in source_domains:

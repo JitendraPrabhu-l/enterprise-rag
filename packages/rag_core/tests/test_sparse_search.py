@@ -39,6 +39,20 @@ def _hit(doc_id: str, score: float, source: dict[str, Any]) -> dict[str, Any]:
     return {"_id": doc_id, "_score": score, "_source": source}
 
 
+def _find_acl_clause(search_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Pick the ACL bool-clause (references allowed_principals) out of the
+    filter array. Since ADR-034 the filter also contains a currency bool
+    clause, so selecting by content — not position — keeps the ACL tests
+    robust to the currency clause's presence."""
+    filter_clauses = search_kwargs["body"]["query"]["bool"]["filter"]
+    for clause in filter_clauses:
+        if "bool" in clause and any(
+            "allowed_principals" in str(s) for s in clause["bool"].get("should", [])
+        ):
+            return clause
+    raise AssertionError("no ACL clause found in filter")
+
+
 @pytest.mark.asyncio
 async def test_search_includes_tenant_id_as_hard_filter_clause() -> None:
     client = _make_client()
@@ -120,7 +134,16 @@ class TestSparseSearchAclFilter:
 
         _, kwargs = mock_os_client.search.await_args
         filter_clauses = kwargs["body"]["query"]["bool"]["filter"]
-        acl_clauses = [c for c in filter_clauses if "bool" in c]
+        # Two bool clauses now: ADR-024 ACL and ADR-034 currency. Select the
+        # ACL one specifically (it references allowed_principals) rather than
+        # asserting a single bool clause, so the currency clause's presence
+        # doesn't make this test brittle.
+        acl_clauses = [
+            c
+            for c in filter_clauses
+            if "bool" in c
+            and any("allowed_principals" in str(s) for s in c["bool"].get("should", []))
+        ]
         assert len(acl_clauses) == 1
         should = acl_clauses[0]["bool"]["should"]
         assert {"terms": {"allowed_principals": ["user:alice", "group:eng"]}} in should
@@ -141,7 +164,10 @@ class TestSparseSearchAclFilter:
 
         _, kwargs = mock_os_client.search.await_args
         acl_clause = [
-            c for c in kwargs["body"]["query"]["bool"]["filter"] if "bool" in c
+            c
+            for c in kwargs["body"]["query"]["bool"]["filter"]
+            if "bool" in c
+            and any("allowed_principals" in str(s) for s in c["bool"].get("should", []))
         ][0]
         assert {"bool": {"must_not": [{"exists": {"field": "allowed_principals"}}]}} in (
             acl_clause["bool"]["should"]
@@ -161,9 +187,7 @@ class TestSparseSearchAclFilter:
         )
 
         _, kwargs = mock_os_client.search.await_args
-        acl_clause = [
-            c for c in kwargs["body"]["query"]["bool"]["filter"] if "bool" in c
-        ][0]
+        acl_clause = _find_acl_clause(kwargs)
         assert {"terms": {"allowed_principals": ["public"]}} in acl_clause["bool"]["should"]
 
     async def test_omitted_principals_defaults_to_public_sentinel(self) -> None:
@@ -178,10 +202,51 @@ class TestSparseSearchAclFilter:
         await client.search(query="revenue", source_domains=["x"], tenant_id="t", top_k=5)
 
         _, kwargs = mock_os_client.search.await_args
-        acl_clause = [
-            c for c in kwargs["body"]["query"]["bool"]["filter"] if "bool" in c
-        ][0]
+        acl_clause = _find_acl_clause(kwargs)
         assert {"terms": {"allowed_principals": ["public"]}} in acl_clause["bool"]["should"]
+
+
+@pytest.mark.asyncio
+class TestSparseCurrencyFilter:
+    """ADR-034: currency is a hard bool.filter clause by default, opt-out only —
+    mirroring the dense side (build_acl_filter)."""
+
+    @staticmethod
+    def _find_currency_clause(search_kwargs: dict[str, Any]) -> dict[str, Any] | None:
+        for clause in search_kwargs["body"]["query"]["bool"]["filter"]:
+            if "bool" in clause and any(
+                "is_current" in str(s) for s in clause["bool"].get("should", [])
+            ):
+                return clause
+        return None
+
+    async def test_currency_clause_present_by_default(self) -> None:
+        client = _make_client()
+        mock_os_client = AsyncMock()
+        mock_os_client.search.return_value = {"hits": {"hits": []}}
+        client._client = mock_os_client  # type: ignore[attr-defined]
+
+        await client.search(query="q", source_domains=["x"], tenant_id="t", top_k=5)
+
+        _, kwargs = mock_os_client.search.await_args
+        currency = self._find_currency_clause(kwargs)
+        assert currency is not None
+        should = currency["bool"]["should"]
+        assert {"term": {"is_current": True}} in should
+        assert {"bool": {"must_not": [{"exists": {"field": "is_current"}}]}} in should
+
+    async def test_include_superseded_removes_currency_clause(self) -> None:
+        client = _make_client()
+        mock_os_client = AsyncMock()
+        mock_os_client.search.return_value = {"hits": {"hits": []}}
+        client._client = mock_os_client  # type: ignore[attr-defined]
+
+        await client.search(
+            query="q", source_domains=["x"], tenant_id="t", top_k=5, include_superseded=True
+        )
+
+        _, kwargs = mock_os_client.search.await_args
+        assert self._find_currency_clause(kwargs) is None
 
 
 @pytest.mark.asyncio

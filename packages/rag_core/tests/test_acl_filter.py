@@ -13,13 +13,14 @@ from rag_core.vector_store import build_acl_filter
 
 
 class TestBuildAclFilterStructure:
-    def test_has_exactly_two_must_clauses(self) -> None:
-        """Tenant scoping and ACL scoping are both hard `must` (AND)
-        conditions — a `should` for either would let out-of-scope
-        documents rank in at lower score instead of being excluded
-        outright (ADR-010/ADR-024)."""
+    def test_has_three_must_clauses_by_default(self) -> None:
+        """Tenant scoping, ACL scoping, and currency (ADR-034) are all hard
+        `must` (AND) conditions — a `should` for any would let out-of-scope
+        or superseded documents rank in at lower score instead of being
+        excluded outright (ADR-010/ADR-024/ADR-034). The currency clause is
+        present by default because retrieval defaults to current content."""
         f = build_acl_filter(tenant_id="tenant-a", principals=["user:alice"])
-        assert len(f.must) == 2
+        assert len(f.must) == 3
 
     def test_first_clause_is_tenant_scoping(self) -> None:
         f = build_acl_filter(tenant_id="tenant-a", principals=["user:alice"])
@@ -72,3 +73,34 @@ class TestBuildAclFilterFailsClosed:
         f = build_acl_filter(tenant_id="tenant-a", principals=["user:alice", "  ", ""])
         acl_group = f.must[1]
         assert acl_group.should[0].match.any == ["user:alice"]
+
+
+class TestBuildAclFilterCurrency:
+    """ADR-034: currency is a hard pre-filter by default, opt-out only."""
+
+    def test_currency_clause_admits_current_or_field_absent(self) -> None:
+        """The third must-clause keeps a doc that is explicitly is_current=true
+        OR predates the field (IsEmpty) — mirroring the ACL backward-compat
+        branch, so only an actively-marked-stale doc is ever filtered out."""
+        f = build_acl_filter(tenant_id="tenant-a", principals=["user:alice"])
+        currency_group = f.must[2]
+        current_condition = currency_group.should[0]
+        assert current_condition.key == "metadata.is_current"
+        assert current_condition.match.value is True
+        assert isinstance(currency_group.should[1], models.IsEmptyCondition)
+        assert currency_group.should[1].is_empty.key == "metadata.is_current"
+
+    def test_include_superseded_drops_the_currency_clause(self) -> None:
+        """A caller who opts into historical content gets only the tenant +
+        ACL clauses back — the currency filter is gone, so superseded
+        versions become retrievable again."""
+        f = build_acl_filter(
+            tenant_id="tenant-a", principals=["user:alice"], include_superseded=True
+        )
+        assert len(f.must) == 2
+        # Neither remaining clause references is_current.
+        assert all(
+            getattr(c, "key", None) != "metadata.is_current"
+            for c in f.must
+            if isinstance(c, models.FieldCondition)
+        )

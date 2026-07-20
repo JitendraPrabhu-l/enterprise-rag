@@ -174,10 +174,11 @@ class TestSearchAppliesTenantHardFilter:
 
         _, kwargs = mock_query.call_args
         query_filter: Any = kwargs["query_filter"]
-        # Two hard `must` (AND) conditions now (ADR-010 tenant + ADR-024 ACL):
-        # a `should` for either would let out-of-scope docs rank in, just
-        # lower, rather than excluding them. First is tenant scoping.
-        assert len(query_filter.must) == 2
+        # Three hard `must` (AND) conditions now (ADR-010 tenant + ADR-024 ACL
+        # + ADR-034 currency): a `should` for any would let out-of-scope or
+        # superseded docs rank in, just lower, rather than excluding them.
+        # First is tenant scoping.
+        assert len(query_filter.must) == 3
         tenant_condition = query_filter.must[0]
         assert tenant_condition.key == "metadata.tenant_id"
         assert tenant_condition.match.value == "tenant-a"
@@ -188,3 +189,7 @@ class TestSearchAppliesTenantHardFilter:
         principal_match = acl_group.should[0]
         assert principal_match.key == "metadata.allowed_principals"
         assert principal_match.match.any == ["public"]
+        # Third is the ADR-034 currency clause: is_current=true OR field absent.
+        currency_group = query_filter.must[2]
+        assert currency_group.should[0].key == "metadata.is_current"
+        assert currency_group.should[0].match.value is True

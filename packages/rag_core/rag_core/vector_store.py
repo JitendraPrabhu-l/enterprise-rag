@@ -19,8 +19,10 @@ def collection_name(source_domain: str) -> str:
     return f"rag_{source_domain}"
 
 
-def build_acl_filter(*, tenant_id: str, principals: list[str] | None) -> models.Filter:
-    """The hard pre-filter every dense search runs under (ADR-010 + ADR-024).
+def build_acl_filter(
+    *, tenant_id: str, principals: list[str] | None, include_superseded: bool = False
+) -> models.Filter:
+    """The hard pre-filter every dense search runs under (ADR-010 + ADR-024 + ADR-034).
 
     Fail-closed by construction: an empty/None principals list degrades to
     the "public" sentinel — the caller sees only un-ACL'd documents, never
@@ -28,31 +30,54 @@ def build_acl_filter(*, tenant_id: str, principals: list[str] | None) -> models.
     intersected with each chunk's allowed_principals array is exactly the
     "does the caller hold ANY principal this document allows" check the
     document-level RBAC pattern prescribes.
+
+    Currency (ADR-034): unless `include_superseded`, superseded documents are
+    excluded here — before HNSW distance is ever computed — so a stale-but-
+    similar version can never out-rank the version that replaced it. Same
+    backward-compat shape as the ACL branch: points written before ADR-034
+    carry no is_current field and stay visible (their pre-versioning
+    behavior), so this can never hide a document nobody ever marked stale.
     """
     effective = [p for p in (principals or []) if p.strip()] or ["public"]
-    return models.Filter(
-        must=[
-            models.FieldCondition(
-                key="metadata.tenant_id", match=models.MatchValue(value=tenant_id)
-            ),
-            # Points indexed before ADR-024 carry no allowed_principals field
-            # at all — those stay visible tenant-wide (exactly their pre-ACL
-            # behavior) rather than vanishing behind a filter they never
-            # opted into. Points written since always have the field, so the
-            # IsEmpty branch can never weaken an ACL someone actually set.
+    must: list[Any] = [
+        models.FieldCondition(
+            key="metadata.tenant_id", match=models.MatchValue(value=tenant_id)
+        ),
+        # Points indexed before ADR-024 carry no allowed_principals field
+        # at all — those stay visible tenant-wide (exactly their pre-ACL
+        # behavior) rather than vanishing behind a filter they never
+        # opted into. Points written since always have the field, so the
+        # IsEmpty branch can never weaken an ACL someone actually set.
+        models.Filter(
+            should=[
+                models.FieldCondition(
+                    key="metadata.allowed_principals",
+                    match=models.MatchAny(any=effective),
+                ),
+                models.IsEmptyCondition(
+                    is_empty=models.PayloadField(key="metadata.allowed_principals")
+                ),
+            ]
+        ),
+    ]
+    if not include_superseded:
+        # Keep a document if it is explicitly current OR predates the
+        # is_current field entirely (IsEmpty). Only a document a writer
+        # actively marked is_current=false is filtered out — never a legacy
+        # point that never had the field.
+        must.append(
             models.Filter(
                 should=[
                     models.FieldCondition(
-                        key="metadata.allowed_principals",
-                        match=models.MatchAny(any=effective),
+                        key="metadata.is_current", match=models.MatchValue(value=True)
                     ),
                     models.IsEmptyCondition(
-                        is_empty=models.PayloadField(key="metadata.allowed_principals")
+                        is_empty=models.PayloadField(key="metadata.is_current")
                     ),
                 ]
-            ),
-        ]
-    )
+            )
+        )
+    return models.Filter(must=must)
 
 
 class VectorStore:
@@ -92,6 +117,13 @@ class VectorStore:
                 field_name=f"metadata.{field}",
                 field_schema=models.PayloadSchemaType.KEYWORD,
             )
+        # ADR-034 currency pre-filter: bool index so is_current filtering is a
+        # cheap payload lookup, not a full scan.
+        await self._client.create_payload_index(
+            collection_name=name,
+            field_name="metadata.is_current",
+            field_schema=models.PayloadSchemaType.BOOL,
+        )
 
     async def enable_quantization_if_due(self, source_domain: str) -> bool:
         """Turn on scalar INT8 quantization for a domain that has grown past
@@ -195,11 +227,16 @@ class VectorStore:
         tenant_id: str,
         top_k: int,
         principals: list[str] | None = None,
+        include_superseded: bool = False,
     ) -> list[dict[str, Any]]:
-        """Hard pre-filter on tenancy (ADR-010) and principal ACLs (ADR-024),
-        both evaluated before HNSW distance search — a chunk the caller may
-        not see is never even scored, so no post-filter bug can leak it."""
-        must_filter = build_acl_filter(tenant_id=tenant_id, principals=principals)
+        """Hard pre-filter on tenancy (ADR-010), principal ACLs (ADR-024), and
+        currency (ADR-034), all evaluated before HNSW distance search — a
+        chunk the caller may not see, or a superseded version, is never even
+        scored, so no post-filter bug can leak it or let it out-rank current
+        content."""
+        must_filter = build_acl_filter(
+            tenant_id=tenant_id, principals=principals, include_superseded=include_superseded
+        )
         results: list[dict[str, Any]] = []
         for domain in source_domains:
             name = collection_name(domain)
